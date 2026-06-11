@@ -1,110 +1,113 @@
-name: 自动收集优选测速 IP (带国家与ASN)
+name: 自动拉取优选测速IP(标准CSV版)
 
 on:
   schedule:
-    - cron: '0 */6 * * *' # 每 6 小时自动运行一次
+    - cron: '0 0 * * *' # 每天自动刷新
   workflow_dispatch: # 支持手动点击触发
 
 jobs:
-  collect_ips:
+  run-script:
     runs-on: ubuntu-latest
+    
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
-    - name: 检出仓库代码
-      uses: actions/checkout@v4
+    - name: Checkout repository code
+      uses: actions/checkout@v4.2.2
 
-    - name: 设置 Python 环境
-      uses: actions/setup-python@v5
+    - name: Set up Python
+      uses: actions/setup-python@v5.4.0
       with:
         python-version: '3.10'
 
-    - name: 安装基础依赖
+    - name: Create and Run Script
       run: |
-        pip install requests
-
-    - name: 请求 API 并生成复合测速 CSV
-      run: |
-        python -c "
-        import requests
+        cat << 'EOF' > temp_script.py
+        import os
         import re
         import csv
+        import urllib.request
 
-        urls = [
-            'https://ddx.snu.cc/TW?port=443',
-            'https://ddx.snu.cc/HK?port=443',
-            'https://ddx.snu.cc/JP?port=443',
-            'https://ddx.snu.cc/KR?port=443',
-            'https://ddx.snu.cc/SG?port=443',
-            'https://ddx.snu.cc/US?port=443'
-        ]
+        def collect_and_generate_csv():
+            # 6 个国家的 API 接口及国家标识
+            url_configs = [
+                {'url': 'https://ddx.snu.cc/TW?port=443', 'country': 'TW'},
+                {'url': 'https://ddx.snu.cc/HK?port=443', 'country': 'HK'},
+                {'url': 'https://ddx.snu.cc/JP?port=443', 'country': 'JP'},
+                {'url': 'https://ddx.snu.cc/KR?port=443', 'country': 'KR'},
+                {'url': 'https://ddx.snu.cc/SG?port=443', 'country': 'SG'},
+                {'url': 'https://ddx.snu.cc/US?port=443', 'country': 'US'}
+            ]
 
-        # 正则表达式：精准匹配 IP 和 端口
-        ip_port_pattern = re.compile(r'([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):([0-9]+)')
-        
-        collected_data = []
-        seen = set()
+            # 正则：精准捕获文本中的 IP 和 端口
+            ip_port_pattern = re.compile(r'([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):([0-9]+)')
+            
+            collected_rows = []
+            seen_ips = set()
 
-        for url in urls:
-            try:
-                response = requests.get(url, timeout=15)
-                if response.status_code == 200:
-                    text = response.text
-                    matches = ip_port_pattern.findall(text)
+            request_headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
+
+            for config in url_configs:
+                try:
+                    req = urllib.request.Request(config['url'], headers=request_headers)
+                    with urllib.request.urlopen(req, timeout=8) as response:
+                        text = response.read().decode('utf-8')
+                        matches = ip_port_pattern.findall(text)
+                        
+                        for ip, port in matches:
+                            if (ip, port) not in seen_ips:
+                                seen_ips.add((ip, port))
+                                
+                                # 识别并标注对应的 ASN/运营商信息
+                                if ip.startswith('35.') or ip.startswith('34.'):
+                                    asn_name = "AS15169 Google LLC"
+                                else:
+                                    asn_name = "Unknown ASN"
+                                    
+                                # 组织字典结构：ip 和 port 强制排在 CSV 的前两列
+                                collected_rows.append({
+                                    'ip': ip,
+                                    'port': port,
+                                    'country': config['country'],
+                                    'asn': asn_name
+                                })
+                except Exception as e:
+                    print(f"请求接口失败 [{config['url']}]: {e}")
+
+            # 极端情况兜底机制（防止生成空文件导致测速软件报错）
+            if not collected_rows:
+                collected_rows.append({
+                    'ip': '35.189.181.107',
+                    'port': '443',
+                    'country': 'TW',
+                    'asn': 'AS15169 Google LLC'
+                })
+
+            # 固定生成名为 ip.csv 的文件
+            output_filename = "ip.csv"
+            
+            # 使用 utf-8-sig 编码，确保用 Excel 或其他测速工具打开时绝对不会因为中文或格式错乱
+            with open(output_filename, 'w', newline='', encoding='utf-8-sig') as f:
+                # 定义 CSV 的表头，前两列严格锁定为 ip, port
+                writer = csv.DictWriter(f, fieldnames=['ip', 'port', 'country', 'asn'])
+                writer.writeheader()  # 写入首行表头
+                for row in collected_rows:
+                    writer.writerow(row) # 逐行写入逗号分隔的测速数据
                     
-                    for ip, port in matches:
-                        if (ip, port) not in seen:
-                            seen.add((ip, port))
-                            
-                            # 默认国家和ASN，如果在线API没查到则作为保底
-                            country = '未知'
-                            asn = '未知运营商'
-                            
-                            # 通过公网免密 API 动态获取该 IP 的国家和 ASN
-                            try:
-                                geo_res = requests.get(f'http://ip-api.com/json/{ip}?fields=status,country,as', timeout=5)
-                                if geo_res.status_code == 200:
-                                    geo_data = geo_res.json()
-                                    if geo_data.get('status') == 'success':
-                                        country = geo_data.get('country', '未知')
-                                        asn = geo_data.get('as', '未知运营商')
-                            except Exception as geo_err:
-                                print(f'查询 IP {ip} 归属地失败: {geo_err}')
-                                # 针对 35.189.181.107 做硬编码校准保底
-                                if ip == '35.189.181.107':
-                                    country = '台湾 (Taiwan)'
-                                    asn = 'AS15169 Google LLC'
-                            
-                            collected_data.append({
-                                'ip': ip,
-                                'port': port,
-                                'country': country,
-                                'asn': asn
-                            })
-            except Exception as e:
-                print(f'请求失败 {url}: {e}')
+            print(f"CSV文件生成成功，共筛选并去重导出 {len(collected_rows)} 个测速节点。")
 
-        # 保底机制
-        if not collected_data:
-            collected_data = [{
-                'ip': '35.189.181.107',
-                'port': '443',
-                'country': '台湾 (Taiwan)',
-                'asn': 'AS15169 Google LLC'
-            }]
+        if __name__ == "__main__":
+            collect_and_generate_csv()
+        EOF
+        python temp_script.py
 
-        # 写入 CSV（保持 ip 和 port 在前两列，确保测速工具能够正常切分）
-        with open('ip.csv', 'w', newline='', encoding='utf-8-sig') as f:
-            writer = csv.DictWriter(f, fieldnames=['ip', 'port', 'country', 'asn'])
-            writer.writeheader()
-            for row in collected_data:
-                writer.writerow(row)
-
-        print(f'成功收集到 {len(collected_data)} 个带归属地信息的测速 IP。')
-        "
-
-    - name: 自动提交更新到仓库
+    - name: Commit and push changes
       run: |
         git config --local user.email "github-actions[bot]@users.noreply.github.com"
         git config --local user.name "github-actions[bot]"
         git add ip.csv
-        git diff --staged --quiet || (git commit -m "自动更新测速 IP 列表(带归属地) [$(date -u +'%Y-%m-%d %H:%M:%S') UTC]" && git push)
+        git commit --allow-empty -m "自动定时刷新优选测速IP(CSV格式)"
+        git push origin HEAD
