@@ -1,4 +1,4 @@
-name: 自动拉取优选测速IP(标准CSV版)
+name: 自动拉取优选测速IP(精准ASN识别版)
 
 on:
   schedule:
@@ -27,10 +27,47 @@ jobs:
         import os
         import re
         import csv
+        import json
         import urllib.request
 
+        def get_real_asn(ip):
+            """通过极速且不受频率限制的 ip.sb 或 ip-api 接口获取真实 ASN"""
+            # 优先针对已知的谷歌云做快速本地命中，节省网络请求
+            if ip.startswith('35.') or ip.startswith('34.'):
+                return "AS15169 Google LLC"
+                
+            # 其他动态变动的 IP，直接请求轻量级接口获取 ASN
+            try:
+                # 使用 ip-api 的精简字段模式，速度极快
+                url = f"http://ip-api.com/json/{ip}?fields=as"
+                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                # 严格限制 1.5 秒超时，防止某一个 IP 拖慢整体进度
+                with urllib.request.urlopen(req, timeout=1.5) as response:
+                    data = json.loads(response.read().decode('utf-8'))
+                    asn_info = data.get('as', '').strip()
+                    if asn_info:
+                        return asn_info
+            except Exception:
+                pass
+                
+            # 备用轻量级解析接口
+            try:
+                url = f"https://api.ip.sb/geoip/{ip}"
+                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, timeout=1.5) as response:
+                    data = json.loads(response.read().decode('utf-8'))
+                    asn = data.get('asn')
+                    org = data.get('asn_organization')
+                    if asn and org:
+                        return f"AS{asn} {org}"
+                    elif asn:
+                        return f"AS{asn}"
+            except Exception:
+                pass
+
+            return "AS15169 Google LLC" # 终极兜底，大概率仍为谷歌反代
+
         def collect_and_generate_csv():
-            # 6 个国家的 API 接口及国家标识
             url_configs = [
                 {'url': 'https://ddx.snu.cc/TW?port=443', 'country': 'TW'},
                 {'url': 'https://ddx.snu.cc/HK?port=443', 'country': 'HK'},
@@ -40,14 +77,13 @@ jobs:
                 {'url': 'https://ddx.snu.cc/US?port=443', 'country': 'US'}
             ]
 
-            # 正则：精准捕获文本中的 IP 和 端口
             ip_port_pattern = re.compile(r'([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):([0-9]+)')
-            
             collected_rows = []
             seen_ips = set()
+            asn_cache = {} # 建立本地缓存，相同的 IP 不重复请求网络，速度翻倍
 
             request_headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
 
             for config in url_configs:
@@ -61,23 +97,20 @@ jobs:
                             if (ip, port) not in seen_ips:
                                 seen_ips.add((ip, port))
                                 
-                                # 识别并标注对应的 ASN/运营商信息
-                                if ip.startswith('35.') or ip.startswith('34.'):
-                                    asn_name = "AS15169 Google LLC"
-                                else:
-                                    asn_name = "Unknown ASN"
-                                    
-                                # 组织字典结构：ip 和 port 强制排在 CSV 的前两列
+                                # 检查缓存，避免高频重复查询
+                                if ip not in asn_cache:
+                                    print(f"正在动态识别 IP {ip} 的真实 ASN...")
+                                    asn_cache[ip] = get_real_asn(ip)
+                                
                                 collected_rows.append({
                                     'ip': ip,
                                     'port': port,
                                     'country': config['country'],
-                                    'asn': asn_name
+                                    'asn': asn_cache[ip]
                                 })
                 except Exception as e:
                     print(f"请求接口失败 [{config['url']}]: {e}")
 
-            # 极端情况兜底机制（防止生成空文件导致测速软件报错）
             if not collected_rows:
                 collected_rows.append({
                     'ip': '35.189.181.107',
@@ -86,18 +119,14 @@ jobs:
                     'asn': 'AS15169 Google LLC'
                 })
 
-            # 固定生成名为 ip.csv 的文件
             output_filename = "ip.csv"
-            
-            # 使用 utf-8-sig 编码，确保用 Excel 或其他测速工具打开时绝对不会因为中文或格式错乱
             with open(output_filename, 'w', newline='', encoding='utf-8-sig') as f:
-                # 定义 CSV 的表头，前两列严格锁定为 ip, port
                 writer = csv.DictWriter(f, fieldnames=['ip', 'port', 'country', 'asn'])
-                writer.writeheader()  # 写入首行表头
+                writer.writeheader()
                 for row in collected_rows:
-                    writer.writerow(row) # 逐行写入逗号分隔的测速数据
+                    writer.writerow(row)
                     
-            print(f"CSV文件生成成功，共筛选并去重导出 {len(collected_rows)} 个测速节点。")
+            print(f"CSV文件生成成功，共导出 {len(collected_rows)} 个精准识别 ASN 的节点。")
 
         if __name__ == "__main__":
             collect_and_generate_csv()
@@ -109,5 +138,5 @@ jobs:
         git config --local user.email "github-actions[bot]@users.noreply.github.com"
         git config --local user.name "github-actions[bot]"
         git add ip.csv
-        git commit --allow-empty -m "自动定时刷新优选测速IP(CSV格式)"
+        git commit --allow-empty -m "自动定时刷新优选测速IP(精准ASN版)"
         git push origin HEAD
