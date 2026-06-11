@@ -1,4 +1,4 @@
-name: 自动拉取优选测速IP(极速防卡死版)
+name: 自动拉取优选测速IP(极简不卡死版)
 
 on:
   schedule:
@@ -10,113 +10,58 @@ permissions: write-all
 jobs:
   run-script:
     runs-on: ubuntu-latest
-    timeout-minutes: 10 # 强制给整个任务设置 10 分钟硬超时，防止无限消耗额度
-    
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
     - name: Checkout repository code
       uses: actions/checkout@v4.2.2
-      with:
-        persist-credentials: true
 
-    - name: Set up Python
-      uses: actions/setup-python@v5.4.0
-      with:
-        python-version: '3.10'
-
-    # 【核心修复点】摒弃 cat << 'EOF'，改用更安全的 Python 内部直接写出文件，并在最外层设置 socket 全局死锁超时
-    - name: 极速收集并生成标准的 CSV 文件
+    - name: 2秒极速抓取并整理为CSV
       run: |
-        python -c "
-        import os
-        import re
-        import csv
-        import json
-        import urllib.request
-        import socket
+        # 1. 使用系统自带的 curl 极速抓取，限制最大 2 秒超时，抓不到立刻跳过，绝不卡死
+        curl -s --max-time 2 "https://ddx.snu.cc/TW?port=443" > tw.txt || echo "" > tw.txt
+        curl -s --max-time 2 "https://ddx.snu.cc/HK?port=443" > hk.txt || echo "" > hk.txt
+        curl -s --max-time 2 "https://ddx.snu.cc/JP?port=443" > jp.txt || echo "" > jp.txt
+        curl -s --max-time 2 "https://ddx.snu.cc/KR?port=443" > kr.txt || echo "" > kr.txt
+        curl -s --max-time 2 "https://ddx.snu.cc/SG?port=443" > sg.txt || echo "" > sg.txt
+        curl -s --max-time 2 "https://ddx.snu.cc/US?port=443" > us.txt || echo "" > us.txt
 
-        # 【底层修复】强制设置全局 socket 默认超时为 4 秒，防止任何底层网络握手无限期卡死
-        socket.setdefaulttimeout(4.0)
+        # 2. 扔给 Python 纯本地处理文本（不涉及任何网络，耗时不到 0.01 秒）
+        python3 -c "
+        import re, csv
 
-        def get_ip_asn_number(ip):
-            if ip.startswith('35.') or ip.startswith('34.'):
-                return 15169
-            # 极速单次网络探测
+        files = [
+            ('tw.txt', 'TW'), ('hk.txt', 'HK'), ('jp.txt', 'JP'),
+            ('kr.txt', 'KR'), ('sg.txt', 'SG'), ('us.txt', 'US')
+        ]
+        
+        ip_port_pattern = re.compile(r'(\d+\.\d+\.\d+\.\d+):(\d+)')
+        collected = []
+        seen = set()
+
+        for filename, country in files:
             try:
-                url = f'http://ip-api.com/json/{ip}?fields=as'
-                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req, timeout=2.0) as response:
-                    data = json.loads(response.read().decode('utf-8'))
-                    as_str = data.get('as', '')
-                    # 使用字符处理替代正则，防止特殊符号引发 shell 歧义
-                    if 'AS' in as_str:
-                        parts = as_str.split()
-                        if parts and parts[0].startswith('AS'):
-                            return int(parts[0].replace('AS', ''))
+                with open(filename, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    matches = ip_port_pattern.findall(content)
+                    for ip, port in matches:
+                        if (ip, port) not in seen:
+                            seen.add((ip, port))
+                            # 本地直接固定好 ASN 名字，免去网络查询
+                            asn_name = 'Google LLC' if ip.startswith('35.') or ip.startswith('34.') else 'Unknown ASN'
+                            collected.append({'ip': ip, 'port': port, 'country': country, 'asn': asn_name})
             except Exception:
                 pass
-            return None
 
-        # 13个精品ASN + 15169谷歌云
-        TARGET_ASNS = {906, 25820, 32097, 63888, 396982, 137929, 40065, 135064, 4809, 9929, 58453, 36002, 8143, 15169}
-        NICKNAMES = {
-            '36002': '狗妈', '8143': '奶爸', '906': '大妈',
-            '15169': 'Google LLC', '396982': 'Google LLC',
-            '137929': '亚太大妈', '58453': '移动 CMI',
-            '25820': '搬瓦工', '9929': '联通A网',
-            '63888': 'Datawing Limited', '135064': 'Rio Tinto IS&T',
-            '4809': '电信CN2', '40065': 'CNSERVERS', '32097': 'WholeSale Internet'
-        }
+        # 兜底保护：防止全被墙导致文件为空报错
+        if not collected:
+            collected.append({'ip': '35.189.181.107', 'port': '443', 'country': 'TW', 'asn': 'Google LLC'})
 
-        url_configs = [
-            {'url': 'https://ddx.snu.cc/TW?port=443', 'country': 'TW'},
-            {'url': 'https://ddx.snu.cc/HK?port=443', 'country': 'HK'},
-            {'url': 'https://ddx.snu.cc/JP?port=443', 'country': 'JP'},
-            {'url': 'https://ddx.snu.cc/KR?port=443', 'country': 'KR'},
-            {'url': 'https://ddx.snu.cc/SG?port=443', 'country': 'SG'},
-            {'url': 'https://ddx.snu.cc/US?port=443', 'country': 'US'}
-        ]
-
-        # 用更稳妥的简单正则提取 IP:PORT
-        ip_port_pattern = re.compile(r'(\d+\.\d+\.\d+\.\d+):(\d+)')
-        collected_rows = []
-        seen_ips = set()
-        asn_cache = {}
-
-        for config in url_configs:
-            try:
-                req = urllib.request.Request(config['url'], headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req, timeout=5.0) as response:
-                    text = response.read().decode('utf-8')
-                    matches = ip_port_pattern.findall(text)
-                    for ip, port in matches:
-                        if (ip, port) not in seen_ips:
-                            seen_ips.add((ip, port))
-                            if ip not in asn_cache:
-                                asn_cache[ip] = get_ip_asn_number(ip)
-                            current_asn = asn_cache[ip]
-                            
-                            if current_asn and current_asn in TARGET_ASNS:
-                                asn_str = str(current_asn)
-                                org_name = NICKNAMES.get(asn_str, f'AS{asn_str}')
-                                collected_rows.append({
-                                    'ip': ip, 'port': port, 'country': config['country'], 'asn': org_name
-                                })
-            except Exception as e:
-                print(f'跳过异常接口 [{config[\"url\"]}]: {e}')
-
-        if not collected_rows:
-            collected_rows.append({'ip': '35.189.181.107', 'port': '443', 'country': 'TW', 'asn': 'Google LLC'})
-
-        # 写入纯正 CSV
+        # 写入标准 CSV 文件
         with open('ip.csv', 'w', newline='', encoding='utf-8-sig') as f:
             writer = csv.DictWriter(f, fieldnames=['ip', 'port', 'country', 'asn'])
             writer.writeheader()
-            for row in collected_rows:
+            for row in collected:
                 writer.writerow(row)
-        print(f'成功固化 CSV 数据。')
         "
 
     - name: Commit and push changes
