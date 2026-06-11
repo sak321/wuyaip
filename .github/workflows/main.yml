@@ -1,16 +1,16 @@
-name: 自动拉取优选测速IP(知名运营商白名单版)
+name: 自动拉取优选测速IP(极速防卡死版)
 
 on:
   schedule:
-    - cron: '0 0 * * *' # 每天自动刷新
-  workflow_dispatch: # 支持手动点击触发
+    - cron: '0 0 * * *'
+  workflow_dispatch:
 
-# 【核心修复点】显式声明工作流拥有对仓库的最高读写权限，防止 git push 被拒绝
 permissions: write-all
 
 jobs:
   run-script:
     runs-on: ubuntu-latest
+    timeout-minutes: 10 # 强制给整个任务设置 10 分钟硬超时，防止无限消耗额度
     
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -19,7 +19,6 @@ jobs:
     - name: Checkout repository code
       uses: actions/checkout@v4.2.2
       with:
-        # 持久化凭证，确保 git push 拥有正确的 Token
         persist-credentials: true
 
     - name: Set up Python
@@ -27,130 +26,107 @@ jobs:
       with:
         python-version: '3.10'
 
-    - name: Create and Run Script
+    # 【核心修复点】摒弃 cat << 'EOF'，改用更安全的 Python 内部直接写出文件，并在最外层设置 socket 全局死锁超时
+    - name: 极速收集并生成标准的 CSV 文件
       run: |
-        cat << 'EOF' > temp_script.py
+        python -c "
         import os
         import re
         import csv
         import json
         import urllib.request
+        import socket
+
+        # 【底层修复】强制设置全局 socket 默认超时为 4 秒，防止任何底层网络握手无限期卡死
+        socket.setdefaulttimeout(4.0)
 
         def get_ip_asn_number(ip):
             if ip.startswith('35.') or ip.startswith('34.'):
                 return 15169
+            # 极速单次网络探测
             try:
-                url = f"http://ip-api.com/json/{ip}?fields=as"
+                url = f'http://ip-api.com/json/{ip}?fields=as'
                 req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req, timeout=1.5) as response:
+                with urllib.request.urlopen(req, timeout=2.0) as response:
                     data = json.loads(response.read().decode('utf-8'))
                     as_str = data.get('as', '')
-                    match = re.search(r'AS(\d+)', as_str)
-                    if match:
-                        return int(match.group(1))
-            except Exception:
-                pass
-            try:
-                url = f"https://api.ip.sb/geoip/{ip}"
-                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req, timeout=1.5) as response:
-                    data = json.loads(response.read().decode('utf-8'))
-                    asn = data.get('asn')
-                    if asn:
-                        return int(asn)
+                    # 使用字符处理替代正则，防止特殊符号引发 shell 歧义
+                    if 'AS' in as_str:
+                        parts = as_str.split()
+                        if parts and parts[0].startswith('AS'):
+                            return int(parts[0].replace('AS', ''))
             except Exception:
                 pass
             return None
 
-        def collect_and_generate_csv():
-            # 知名精品运营商 ASN 白名单
-            TARGET_ASNS = {906, 25820, 32097, 63888, 396982, 137929, 40065, 135064, 4809, 9929, 58453, 36002, 8143, 15169}
+        # 13个精品ASN + 15169谷歌云
+        TARGET_ASNS = {906, 25820, 32097, 63888, 396982, 137929, 40065, 135064, 4809, 9929, 58453, 36002, 8143, 15169}
+        NICKNAMES = {
+            '36002': '狗妈', '8143': '奶爸', '906': '大妈',
+            '15169': 'Google LLC', '396982': 'Google LLC',
+            '137929': '亚太大妈', '58453': '移动 CMI',
+            '25820': '搬瓦工', '9929': '联通A网',
+            '63888': 'Datawing Limited', '135064': 'Rio Tinto IS&T',
+            '4809': '电信CN2', '40065': 'CNSERVERS', '32097': 'WholeSale Internet'
+        }
 
-            NICKNAMES = {
-                "36002": "狗妈", "8143": "奶爸", "906": "大妈",
-                "15169": "Google LLC", "396982": "Google LLC",
-                "137929": "亚太大妈", "58453": "移动 CMI",
-                "25820": "搬瓦工", "9929": "联通A网",
-                "63888": "Datawing Limited", "135064": "Rio Tinto IS&T",
-                "4809": "电信CN2", "40065": "CNSERVERS", "32097": "WholeSale Internet"
-            }
+        url_configs = [
+            {'url': 'https://ddx.snu.cc/TW?port=443', 'country': 'TW'},
+            {'url': 'https://ddx.snu.cc/HK?port=443', 'country': 'HK'},
+            {'url': 'https://ddx.snu.cc/JP?port=443', 'country': 'JP'},
+            {'url': 'https://ddx.snu.cc/KR?port=443', 'country': 'KR'},
+            {'url': 'https://ddx.snu.cc/SG?port=443', 'country': 'SG'},
+            {'url': 'https://ddx.snu.cc/US?port=443', 'country': 'US'}
+        ]
 
-            url_configs = [
-                {'url': 'https://ddx.snu.cc/TW?port=443', 'country': 'TW'},
-                {'url': 'https://ddx.snu.cc/HK?port=443', 'country': 'HK'},
-                {'url': 'https://ddx.snu.cc/JP?port=443', 'country': 'JP'},
-                {'url': 'https://ddx.snu.cc/KR?port=443', 'country': 'KR'},
-                {'url': 'https://ddx.snu.cc/SG?port=443', 'country': 'SG'},
-                {'url': 'https://ddx.snu.cc/US?port=443', 'country': 'US'}
-            ]
+        # 用更稳妥的简单正则提取 IP:PORT
+        ip_port_pattern = re.compile(r'(\d+\.\d+\.\d+\.\d+):(\d+)')
+        collected_rows = []
+        seen_ips = set()
+        asn_cache = {}
 
-            ip_port_pattern = re.compile(r'([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):([0-9]+)')
-            collected_rows = []
-            seen_ips = set()
-            asn_cache = {}
+        for config in url_configs:
+            try:
+                req = urllib.request.Request(config['url'], headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, timeout=5.0) as response:
+                    text = response.read().decode('utf-8')
+                    matches = ip_port_pattern.findall(text)
+                    for ip, port in matches:
+                        if (ip, port) not in seen_ips:
+                            seen_ips.add((ip, port))
+                            if ip not in asn_cache:
+                                asn_cache[ip] = get_ip_asn_number(ip)
+                            current_asn = asn_cache[ip]
+                            
+                            if current_asn and current_asn in TARGET_ASNS:
+                                asn_str = str(current_asn)
+                                org_name = NICKNAMES.get(asn_str, f'AS{asn_str}')
+                                collected_rows.append({
+                                    'ip': ip, 'port': port, 'country': config['country'], 'asn': org_name
+                                })
+            except Exception as e:
+                print(f'跳过异常接口 [{config[\"url\"]}]: {e}')
 
-            request_headers = {'User-Agent': 'Mozilla/5.0'}
+        if not collected_rows:
+            collected_rows.append({'ip': '35.189.181.107', 'port': '443', 'country': 'TW', 'asn': 'Google LLC'})
 
-            for config in url_configs:
-                try:
-                    req = urllib.request.Request(config['url'], headers=request_headers)
-                    with urllib.request.urlopen(req, timeout=8) as response:
-                        text = response.read().decode('utf-8')
-                        matches = ip_port_pattern.findall(text)
-                        
-                        for ip, port in matches:
-                            if (ip, port) not in seen_ips:
-                                seen_ips.add((ip, port))
-                                if ip not in asn_cache:
-                                    asn_cache[ip] = get_ip_asn_number(ip)
-                                current_asn = asn_cache[ip]
-                                
-                                if current_asn and current_asn in TARGET_ASNS:
-                                    asn_str = str(current_asn)
-                                    org_name = NICKNAMES.get(asn_str, f"AS{asn_str}")
-                                    collected_rows.append({
-                                        'ip': ip, 'port': port, 'country': config['country'], 'asn': org_name
-                                    })
-                except Exception as e:
-                    print(f"请求接口失败 [{config['url']}]: {e}")
+        # 写入纯正 CSV
+        with open('ip.csv', 'w', newline='', encoding='utf-8-sig') as f:
+            writer = csv.DictWriter(f, fieldnames=['ip', 'port', 'country', 'asn'])
+            writer.writeheader()
+            for row in collected_rows:
+                writer.writerow(row)
+        print(f'成功固化 CSV 数据。')
+        "
 
-            # 兜底：如果没筛选出任何数据，写入默认行，确保文件一定会被生成
-            if not collected_rows:
-                collected_rows.append({
-                    'ip': '35.189.181.107', 'port': '443', 'country': 'TW', 'asn': 'Google LLC'
-                })
-
-            output_filename = "ip.csv"
-            with open(output_filename, 'w', newline='', encoding='utf-8-sig') as f:
-                writer = csv.DictWriter(f, fieldnames=['ip', 'port', 'country', 'asn'])
-                writer.writeheader()
-                for row in collected_rows:
-                    writer.writerow(row)
-                    
-            print(f"脚本内生成完毕，本地 ip.csv 包含 {len(collected_rows)} 行数据。")
-
-        if __name__ == "__main__":
-            collect_and_generate_csv()
-        EOF
-        python temp_script.py
-
-    # 【核心修复点】安全、健壮的 Git 提交与同步推送逻辑
     - name: Commit and push changes
       run: |
         git config --local user.email "github-actions[bot]@users.noreply.github.com"
         git config --local user.name "github-actions[bot]"
-        
-        # 强制将 ip.csv 添加到暂存区
         git add ip.csv
-        
-        # 检查是否有内容变更，如果有变更则正常提交，没有变更则允许空提交同步
         if git diff --staged --quiet; then
-          echo "检测到 ip.csv 内容无变化，执行空提交以保持时间戳刷新..."
-          git commit --allow-empty -m "自动刷新优选测速IP(数据未变更同步)"
+          git commit --allow-empty -m "自动刷新优选测速IP(保持同步)"
         else
-          echo "检测到新 IP 数据，正在提交..."
           git commit -m "自动定时刷新优选测速IP(标准CSV版)"
         fi
-        
-        # 使用更为稳妥的 push 命令，将当前分支的 HEAD 强行推送到对应的远程分支
         git push origin HEAD
