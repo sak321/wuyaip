@@ -1,4 +1,4 @@
-name: 自动拉取优选测速IP(网段极速识别版)
+name: 自动拉取优选测速IP(细化ASN网段版)
 
 on:
   schedule:
@@ -15,9 +15,9 @@ jobs:
     - name: Checkout repository code
       uses: actions/checkout@v4.2.2
 
-    - name: 2秒极速抓取并由Python静态识别网段
+    - name: 2秒极速抓取并静态细化识别ASN
       run: |
-        # 1. 使用系统 curl 极速抓取，限制最大 2 秒超时，抓不到立刻跳过
+        # 1. 抓取文本，保持绝对防卡死机制
         curl -s --max-time 2 "https://ddx.snu.cc/TW?port=443" > tw.txt || echo "" > tw.txt
         curl -s --max-time 2 "https://ddx.snu.cc/HK?port=443" > hk.txt || echo "" > hk.txt
         curl -s --max-time 2 "https://ddx.snu.cc/JP?port=443" > jp.txt || echo "" > jp.txt
@@ -25,7 +25,7 @@ jobs:
         curl -s --max-time 2 "https://ddx.snu.cc/SG?port=443" > sg.txt || echo "" > sg.txt
         curl -s --max-time 2 "https://ddx.snu.cc/US?port=443" > us.txt || echo "" > us.txt
 
-        # 2. 扔给 Python 纯本地处理，根据常见优选 IP 段直接命中知名运营商
+        # 2. Python 本地极速细化网段特征比对
         python3 -c "
         import re, csv
 
@@ -38,41 +38,70 @@ jobs:
         collected = []
         seen = set()
 
-        def match_main_stream_asn(ip):
-            \"\"\"根据主流优选 IP 段特征本地秒级识别知名运营商（黑话分类）\"\"\"
-            # 1. 谷歌云 Google Cloud (AS15169 / AS396982)
-            if ip.startswith(('34.', '35.', '104.196.', '104.197.', '104.198.', '104.199.', '130.211.', '146.148.', '162.222.', '192.158.', '208.117.')):
-                return 'Google LLC'
+        def get_refined_asn(ip):
+            \"\"\"深度细化主流云厂商与精品机房 IP 段特征匹配\"\"\"
             
-            # 2. 甲骨文 Oracle 大妈 (AS14061 / AS36040)
-            if ip.startswith(('129.213.', '130.61.', '132.145.', '138.1.', '140.82.', '144.22.', '147.154.', '150.136.', '152.67.', '152.70.', '158.101.', '168.138.', '192.29.')):
-                return '大妈'
+            # 1. Cloudflare (直接标出，不做细化处理)
+            if ip.startswith(('104.16.', '104.17.', '104.18.', '104.19.', '104.20.', '104.21.', '172.64.', '172.65.', '172.66.', '172.67.', '172.68.', '172.69.', '172.70.', '172.71.', '162.158.', '188.114.')):
+                return 'Cloudflare'
+
+            # 2. 谷歌云 Google Cloud (GCP)
+            if ip.startswith(('34.', '35.', '104.196.', '104.197.', '104.198.', '104.199.', '130.211.', '146.148.', '162.222.', '192.158.', '208.117.')):
+                return 'Google Cloud'
+            
+            # 3. 甲骨文 Oracle (大妈)
+            if ip.startswith(('129.213.', '130.61.', '132.145.', '138.1.', '140.82.', '144.22.', '147.154.', '150.136.', '152.67.', '152.70.', '158.101.', '168.138.', '192.29.', '193.122.', '193.123.')):
+                return 'Oracle 大妈'
                 
-            # 3. 狗妈 Gcore / Gomami (AS36002)
+            # 4. Gcore (狗妈)
             if ip.startswith(('92.223.', '92.38.', '95.85.', '81.177.', '185.192.', '185.22.', '188.93.', '195.34.')):
-                return '狗妈'
+                return 'Gcore 狗妈'
                 
-            # 4. 奶爸 Neburst (AS8143)
+            # 5. Neburst (奶爸)
             if ip.startswith(('45.142.', '45.154.', '103.146.', '154.22.', '194.58.')):
-                return '奶爸'
+                return 'Neburst 奶爸'
+            
+            # 6. AWS 亚马逊云
+            if ip.startswith(('3.', '13.', '15.', '18.', '52.', '54.')):
+                return 'AWS 亚马逊'
                 
-            # 5. 电信 CN2 GIA (AS4809)
-            if ip.startswith(('59.43.', '113.108.2.', '113.108.3.', '183.91.')):
-                return '电信CN2'
+            # 7. Microsoft Azure 微软云
+            if ip.startswith(('20.', '40.', '65.', '104.40.', '104.41.', '104.42.', '104.43.', '104.44.', '104.45.', '104.46.', '104.47.')):
+                return 'Azure 微软云'
+
+            # 8. DigitalOcean (经典大水管)
+            if ip.startswith(('104.131.', '104.236.', '138.197.', '159.203.', '162.243.', '192.241.', '167.71.', '167.99.', '206.189.', '178.128.')):
+                return 'DigitalOcean'
+
+            # 9. Vultr
+            if ip.startswith(('45.32.', '45.76.', '104.156.', '108.61.', '149.28.', '207.148.', '216.239.', '155.138.', '104.207.', '104.238.')):
+                return 'Vultr'
+
+            # 10. Linode / Akamai
+            if ip.startswith(('45.33.', '45.79.', '50.116.', '139.162.', '172.104.', '172.105.', '173.255.', '192.155.', '198.58.', '66.228.')):
+                return 'Linode (Akamai)'
+
+            # 11. 搬瓦工 BandwagonHost / IT7
+            if ip.startswith(('23.224.', '23.225.', '64.64.', '64.69.', '65.49.', '67.218.', '74.121.', '98.126.', '104.143.', '172.247.', '162.24.')):
+                return '搬瓦工 IT7'
                 
-            # 6. 联通 A网/9929 (AS9929)
-            if ip.startswith(('210.13.', '210.14.', '210.22.', '58.254.', '218.105.')):
-                return '联通A网'
+            # 12. Misaka 御坂网络
+            if ip.startswith(('152.53.', '194.50.')):
+                return 'Misaka 御坂'
+
+            # 13. 中国电信 CN2 GIA
+            if ip.startswith(('59.43.', '113.108.', '183.91.', '118.89.', '101.226.', '61.129.')):
+                return '电信 CN2'
                 
-            # 7. 移动 CMI (AS58453)
-            if ip.startswith(('223.118.', '223.119.', '223.120.', '223.121.', '117.18.x.')):
+            # 14. 联通 9929 / A网
+            if ip.startswith(('210.13.', '210.14.', '210.22.', '58.254.', '218.105.', '219.158.')):
+                return '联通 9929'
+                
+            # 15. 移动 CMI
+            if ip.startswith(('223.118.', '223.119.', '223.120.', '223.121.', '117.18.')):
                 return '移动 CMI'
 
-            # 8. 其余常见精品段保底（如搬瓦工、CNSERVERS等）
-            if ip.startswith(('23.224.', '23.225.', '64.64.', '64.69.', '65.49.', '67.218.', '74.121.', '98.126.', '104.143.', '172.247.')):
-                return '精品多线/搬瓦工'
-
-            return '知名精品运营商' # 因为都是精选出来的IP，找不到明确段的直接以此保底，不显示Unknown
+            return '知名精品机房' # 其他未能匹配到精确特征段的优选节点
 
         for filename, country in files:
             try:
@@ -82,14 +111,14 @@ jobs:
                     for ip, port in matches:
                         if (ip, port) not in seen:
                             seen.add((ip, port))
-                            # 本地快速网段比对
-                            asn_name = match_main_stream_asn(ip)
+                            # 传入函数，打上细分标签
+                            asn_name = get_refined_asn(ip)
                             collected.append({'ip': ip, 'port': port, 'country': country, 'asn': asn_name})
             except Exception:
                 pass
 
         if not collected:
-            collected.append({'ip': '35.189.181.107', 'port': '443', 'country': 'TW', 'asn': 'Google LLC'})
+            collected.append({'ip': '35.189.181.107', 'port': '443', 'country': 'TW', 'asn': 'Google Cloud'})
 
         with open('ip.csv', 'w', newline='', encoding='utf-8-sig') as f:
             writer = csv.DictWriter(f, fieldnames=['ip', 'port', 'country', 'asn'])
@@ -106,6 +135,6 @@ jobs:
         if git diff --staged --quiet; then
           git commit --allow-empty -m "自动刷新优选测速IP(保持同步)"
         else
-          git commit -m "自动定时刷新优选测速IP(标准CSV版)"
+          git commit -m "自动定时刷新优选测速IP(细化ASN版)"
         fi
         git push origin HEAD
