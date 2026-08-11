@@ -1,0 +1,73 @@
+name: 每日抓取 CFIP 节点
+
+on:
+  workflow_dispatch:
+
+  schedule:
+    # 每天北京时间 08:00 执行
+    # GitHub Actions 使用 UTC，这里是 00:00 UTC
+    - cron: "0 0 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  collect-cfip:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: 抓取并整理 CFIP
+        run: |
+          python scripts/cfip_collect.py
+
+      - name: 显示生成结果
+        run: |
+          echo "=========================================="
+          echo "CFIP 生成结果"
+          echo "=========================================="
+
+          if [ -f output/all/ipv4.txt ]; then
+            echo "IPv4 数量: $(wc -l < output/all/ipv4.txt)"
+          else
+            echo "IPv4 文件不存在"
+          fi
+
+          if [ -f output/all/ipv6.txt ]; then
+            echo "IPv6 数量: $(wc -l < output/all/ipv6.txt)"
+          else
+            echo "IPv6 文件不存在"
+          fi
+
+          echo
+          echo "地区目录："
+          find output/node_location -type f | sort || true
+
+          echo
+          echo "=========================================="
+
+      - name: 提交结果
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add output/
+
+          if git diff --cached --quiet; then
+            echo "没有新的变化，不需要提交。"
+          else
+            git commit -m "chore: 更新 CFIP IP 列表"
+            git push
+          fi
